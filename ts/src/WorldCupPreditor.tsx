@@ -118,30 +118,37 @@ export default function WorldCupPredictor() {
     groupThirds[g] = groupRankings[g][2];
   }
 
-  // Resolve a bracket slot reference to a team name
-  function resolveSlot(slot: string): string | null {
-    if (!slot) return null;
-    if (slot.startsWith("1")) {
-      const g = slot[1];
-      return groupWinners[g] || null;
-    }
-    if (slot.startsWith("2")) {
-      const g = slot[1];
-      return groupRunnerUps[g] || null;
-    }
-    if (slot.startsWith("3")) {
-      // 3ABC / 3DEF / 3GHI / 3JKL — pick from selected thirds in those groups
-      const letters = slot.slice(1).split("");
-      const eligible = letters
-        .map((l) => (selectedThirds.includes(l) ? groupThirds[l] : null))
-        .filter((t): t is string => t != null);
-      return eligible[0] || null; // just fill first available for display
-    }
-    return slot; // already a team name (from bracket picks)
-  }
-
   // Build the bracket rounds from R32 picks
   function buildBracket(): BracketRoundData[] {
+    // Pre-build consumed queues for 3rd-place slots so the same team is never
+    // assigned to two different matches.  Each "3XYZ" slot label appears twice
+    // in R32_BRACKET; the queue ensures the first occurrence gets one team and
+    // the second occurrence gets a different team (or null).
+    const GROUP_TO_SLOT: Record<string, string> = {
+      A: "3ABC", B: "3ABC", C: "3ABC",
+      D: "3DEF", E: "3DEF", F: "3DEF",
+      G: "3GHI", H: "3GHI", I: "3GHI",
+      J: "3JKL", K: "3JKL", L: "3JKL",
+    };
+    const thirdsQueues: Record<string, string[]> = {
+      "3ABC": [], "3DEF": [], "3GHI": [], "3JKL": [],
+    };
+    for (const g of selectedThirds) {
+      const slot = GROUP_TO_SLOT[g];
+      if (slot) thirdsQueues[slot].push(groupThirds[g]);
+    }
+
+    function resolveSlot(slot: string): string | null {
+      if (!slot) return null;
+      if (slot.startsWith("1")) return groupWinners[slot[1]] || null;
+      if (slot.startsWith("2")) return groupRunnerUps[slot[1]] || null;
+      if (slot.startsWith("3")) {
+        // Shift (consume) from the queue — each call yields a unique team
+        return thirdsQueues[slot]?.shift() ?? null;
+      }
+      return slot;
+    }
+
     // R32 → 16 → QF (8) → SF (4) → Final (2) → Champion
     const rounds: BracketRoundData[] = [];
     // Round of 32
@@ -271,6 +278,8 @@ export default function WorldCupPredictor() {
             champion={champion ?? null}
             onPick={pickWinner}
             onBack={() => setStep(1)}
+            groupRankings={groupRankings}
+            selectedThirds={selectedThirds}
           />
         )}
       </main>
