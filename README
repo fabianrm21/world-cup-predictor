@@ -1,0 +1,1285 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// ─── WINDOW GLOBALS (CDN-loaded libraries) ────────────────────────────────────
+
+declare global {
+  interface Window {
+    html2canvas?: (
+      element: HTMLElement,
+      options?: Record<string, unknown>
+    ) => Promise<HTMLCanvasElement>;
+    jspdf?: {
+      jsPDF: new (options: Record<string, unknown>) => {
+        addImage: (
+          imgData: string,
+          format: string,
+          x: number,
+          y: number,
+          w: number,
+          h: number
+        ) => void;
+        save: (filename: string) => void;
+      };
+    };
+  }
+}
+
+// ─── TYPES ────────────────────────────────────────────────────────────────────
+
+type GroupKey = keyof typeof GROUPS;
+type BracketMatch = { id: string; t1: string | null; t2: string | null };
+type BracketRoundData = { label: string; matches: BracketMatch[] };
+
+// ─── DATA ────────────────────────────────────────────────────────────────────
+
+const GROUPS = {
+  A: ["Mexico", "South Africa", "South Korea", "Czechia"],
+  B: ["Canada", "Bosnia and Herzegovina", "Qatar", "Switzerland"],
+  C: ["Brazil", "Morocco", "Haiti", "Scotland"],
+  D: ["USA", "Paraguay", "Australia", "Türkiye"],
+  E: ["Germany", "Curaçao", "Ivory Coast", "Ecuador"],
+  F: ["Netherlands", "Japan", "Sweden", "Tunisia"],
+  G: ["Belgium", "Egypt", "Iran", "New Zealand"],
+  H: ["Spain", "Cape Verde", "Saudi Arabia", "Uruguay"],
+  I: ["France", "Senegal", "Norway", "Iraq"],
+  J: ["Argentina", "Algeria", "Austria", "Jordan"],
+  K: ["Portugal", "DR Congo", "Uzbekistan", "Colombia"],
+  L: ["England", "Croatia", "Ghana", "Panama"],
+};
+
+const FLAGS: Record<string, string> = {
+  Mexico: "🇲🇽", "South Africa": "🇿🇦", "South Korea": "🇰🇷", Czechia: "🇨🇿",
+  Canada: "🇨🇦", "Bosnia and Herzegovina": "🇧🇦", Qatar: "🇶🇦", Switzerland: "🇨🇭",
+  Brazil: "🇧🇷", Morocco: "🇲🇦", Haiti: "🇭🇹", Scotland: "🏴󠁧󠁢󠁳󠁣󠁴󠁿",
+  USA: "🇺🇸", Paraguay: "🇵🇾", Australia: "🇦🇺", "Türkiye": "🇹🇷",
+  Germany: "🇩🇪", "Curaçao": "🇨🇼", "Ivory Coast": "🇨🇮", Ecuador: "🇪🇨",
+  Netherlands: "🇳🇱", Japan: "🇯🇵", Sweden: "🇸🇪", Tunisia: "🇹🇳",
+  Belgium: "🇧🇪", Egypt: "🇪🇬", Iran: "🇮🇷", "New Zealand": "🇳🇿",
+  Spain: "🇪🇸", "Cape Verde": "🇨🇻", "Saudi Arabia": "🇸🇦", Uruguay: "🇺🇾",
+  France: "🇫🇷", Senegal: "🇸🇳", Norway: "🇳🇴", Iraq: "🇮🇶",
+  Argentina: "🇦🇷", Algeria: "🇩🇿", Austria: "🇦🇹", Jordan: "🇯🇴",
+  Portugal: "🇵🇹", "DR Congo": "🇨🇩", Uzbekistan: "🇺🇿", Colombia: "🇨🇴",
+  England: "🏴󠁧󠁢󠁥󠁮󠁧󠁿", Croatia: "🇭🇷", Ghana: "🇬🇭", Panama: "🇵🇦",
+  TBD: "❓",
+};
+
+// The official bracket seeding for Round of 32 based on FIFA 2026 format
+// Each matchup: [winner/runner from group, opponent]
+// Groups A–L: 1A=winner A, 2A=runner-up A, 3X=3rd-place best
+// Bracket pathway (per FIFA's published bracket):
+// Left side: A,B,C,D,E,F  Right side: G,H,I,J,K,L
+// R32 matchups (official FIFA seeding):
+const R32_BRACKET = [
+  // Pathway 1 (Left)
+  { id: "r32_1", slot1: "1A", slot2: "2C" },
+  { id: "r32_2", slot1: "1C", slot2: "2A" },
+  { id: "r32_3", slot1: "1B", slot2: "2D" },
+  { id: "r32_4", slot1: "1D", slot2: "2B" },
+  { id: "r32_5", slot1: "1E", slot2: "3ABC" },
+  { id: "r32_6", slot1: "1F", slot2: "3DEF" },
+  { id: "r32_7", slot1: "2E", slot2: "3GHI" },
+  { id: "r32_8", slot1: "2F", slot2: "3JKL" },
+  // Pathway 2 (Right)
+  { id: "r32_9",  slot1: "1G", slot2: "2I" },
+  { id: "r32_10", slot1: "1I", slot2: "2G" },
+  { id: "r32_11", slot1: "1H", slot2: "2J" },
+  { id: "r32_12", slot1: "1J", slot2: "2H" },
+  { id: "r32_13", slot1: "1K", slot2: "3GHI" },  // will be reassigned dynamically
+  { id: "r32_14", slot1: "1L", slot2: "3DEF" },
+  { id: "r32_15", slot1: "2K", slot2: "3ABC" },
+  { id: "r32_16", slot1: "2L", slot2: "3JKL" },
+];
+
+// ─── STYLES (injected once) ───────────────────────────────────────────────────
+
+const STYLE = `
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0a0c0f;
+    --surface: #12161c;
+    --surface2: #1a1f28;
+    --border: #252c38;
+    --accent: #f0c040;
+    --accent2: #3dd68c;
+    --danger: #f05050;
+    --text: #e8eaf0;
+    --dim: #5a6275;
+    --dim2: #8a95a8;
+    --gold: #f0c040;
+    --silver: #9bb0c8;
+    --bronze: #d4845a;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', sans-serif; }
+
+  .wcp-app {
+    min-height: 100vh;
+    background: var(--bg);
+    background-image:
+      radial-gradient(ellipse 80% 40% at 50% -10%, rgba(240,192,64,0.07) 0%, transparent 70%);
+    padding-bottom: 80px;
+  }
+
+  .wcp-header {
+    padding: 48px 24px 32px;
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+  }
+  .wcp-header::after {
+    content: '';
+    position: absolute;
+    bottom: -1px; left: 50%; transform: translateX(-50%);
+    width: 120px; height: 2px;
+    background: var(--accent);
+  }
+  .wcp-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: clamp(2.4rem, 6vw, 4.5rem);
+    letter-spacing: 0.06em;
+    color: var(--text);
+    line-height: 1;
+  }
+  .wcp-title span { color: var(--accent); }
+  .wcp-subtitle {
+    margin-top: 8px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.75rem;
+    letter-spacing: 0.15em;
+    color: var(--dim2);
+    text-transform: uppercase;
+  }
+
+  /* STEPPER */
+  .wcp-stepper {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 0;
+    padding: 28px 24px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--border);
+  }
+  .wcp-step {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    cursor: pointer;
+    user-select: none;
+  }
+  .wcp-step-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-radius: 6px;
+    transition: background 0.15s;
+  }
+  .wcp-step:hover .wcp-step-inner { background: var(--surface2); }
+  .wcp-step-num {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--dim2);
+    transition: all 0.2s;
+  }
+  .wcp-step.active .wcp-step-num {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--bg);
+  }
+  .wcp-step.done .wcp-step-num {
+    border-color: var(--accent2);
+    background: var(--accent2);
+    color: var(--bg);
+  }
+  .wcp-step-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .wcp-step.active .wcp-step-label { color: var(--accent); }
+  .wcp-step.done .wcp-step-label { color: var(--accent2); }
+  .wcp-step-connector {
+    width: 32px; height: 1px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+
+  /* CONTENT */
+  .wcp-content { max-width: 1280px; margin: 0 auto; padding: 32px 16px; }
+
+  /* SECTION HEADING */
+  .wcp-section-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1.6rem;
+    letter-spacing: 0.08em;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .wcp-section-desc {
+    font-size: 0.82rem;
+    color: var(--dim2);
+    margin-bottom: 28px;
+    line-height: 1.5;
+  }
+
+  /* GROUP STAGE */
+  .wcp-groups-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .wcp-group-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .wcp-group-header {
+    background: var(--surface2);
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+  }
+  .wcp-group-letter {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1.3rem;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+  }
+  .wcp-group-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    color: var(--dim);
+    letter-spacing: 0.12em;
+  }
+  .wcp-group-teams { padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+  .wcp-team-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: all 0.15s;
+    border: 1px solid transparent;
+    font-size: 0.88rem;
+  }
+  .wcp-team-row:hover { background: var(--surface2); }
+  .wcp-team-row.rank-1 { border-color: var(--gold); background: rgba(240,192,64,0.05); }
+  .wcp-team-row.rank-2 { border-color: var(--silver); background: rgba(155,176,200,0.05); }
+  .wcp-team-row.rank-3 { background: rgba(212,132,90,0.04); }
+  .wcp-team-name { display: flex; align-items: center; gap: 8px; }
+  .wcp-rank-badge {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+    min-width: 22px;
+    text-align: center;
+  }
+  .rank-badge-1 { background: var(--gold); color: var(--bg); }
+  .rank-badge-2 { background: var(--silver); color: var(--bg); }
+  .rank-badge-3 { background: rgba(212,132,90,0.3); color: var(--bronze); }
+  .rank-badge-4 { background: var(--surface2); color: var(--dim); }
+  .wcp-rank-arrows { display: flex; flex-direction: column; gap: 1px; }
+  .wcp-rank-arrow {
+    width: 22px; height: 22px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--surface2);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.65rem;
+    color: var(--dim2);
+    transition: all 0.12s;
+    line-height: 1;
+  }
+  .wcp-rank-arrow:hover { border-color: var(--accent); color: var(--accent); background: rgba(240,192,64,0.08); }
+  .wcp-rank-arrow:disabled { opacity: 0.25; cursor: not-allowed; }
+
+  /* THIRD PLACE PICKER */
+  .wcp-third-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+  .wcp-third-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    cursor: pointer;
+    transition: all 0.15s;
+    position: relative;
+  }
+  .wcp-third-card:hover { border-color: var(--dim2); }
+  .wcp-third-card.selected { border-color: var(--accent2); background: rgba(61,214,140,0.06); }
+  .wcp-third-card.excluded { opacity: 0.4; }
+  .wcp-third-group {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 6px;
+  }
+  .wcp-third-team { font-size: 0.9rem; display: flex; align-items: center; gap: 6px; }
+  .wcp-third-check {
+    position: absolute;
+    top: 10px; right: 10px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--accent2);
+    color: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.65rem;
+    font-weight: bold;
+  }
+  .wcp-third-info {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--dim2);
+    margin-bottom: 20px;
+    line-height: 1.6;
+  }
+
+  /* NAVIGATION BUTTONS */
+  .wcp-nav {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 32px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+  }
+  .wcp-btn {
+    padding: 10px 22px;
+    border-radius: 5px;
+    border: none;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .wcp-btn-primary {
+    background: var(--accent);
+    color: var(--bg);
+  }
+  .wcp-btn-primary:hover { background: #f8d060; }
+  .wcp-btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  .wcp-btn-secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--dim2);
+  }
+  .wcp-btn-secondary:hover { border-color: var(--dim2); color: var(--text); }
+
+  /* BRACKET */
+  .wcp-bracket-outer {
+    overflow-x: auto;
+    padding-bottom: 16px;
+  }
+  .wcp-bracket {
+    display: flex;
+    gap: 0;
+    min-width: 960px;
+    align-items: flex-start;
+  }
+  .wcp-round {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+  }
+  .wcp-round-header {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 0.9rem;
+    letter-spacing: 0.1em;
+    text-align: center;
+    color: var(--dim2);
+    padding: 0 8px 12px;
+    white-space: nowrap;
+  }
+  .wcp-round-matches {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .wcp-match-wrapper {
+    display: flex;
+    align-items: center;
+  }
+
+  .wcp-match {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    width: 180px;
+    overflow: hidden;
+    margin: 4px 8px;
+    flex-shrink: 0;
+    transition: border-color 0.15s;
+  }
+  .wcp-match:hover { border-color: var(--dim2); }
+
+  .wcp-match-team {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 10px;
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: background 0.12s;
+    gap: 6px;
+    min-height: 34px;
+  }
+  .wcp-match-team:hover { background: var(--surface2); }
+  .wcp-match-team.winner {
+    background: rgba(240,192,64,0.08);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .wcp-match-team.winner .wcp-win-dot { opacity: 1; }
+  .wcp-match-divider { height: 1px; background: var(--border); }
+  .wcp-match-team-name {
+    display: flex; align-items: center; gap: 5px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+  }
+  .wcp-win-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .wcp-match-flag { font-size: 1em; flex-shrink: 0; }
+
+  /* connector lines */
+  .wcp-connector {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+    width: 16px;
+    flex-shrink: 0;
+  }
+  .wcp-connector-line {
+    flex: 1;
+    border-right: 1px solid var(--border);
+  }
+  .wcp-connector-line.top { border-bottom: 1px solid var(--border); }
+  .wcp-connector-line.bottom { border-top: 1px solid var(--border); }
+
+  /* CHAMPION */
+  .wcp-champion-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 32px;
+    text-align: center;
+    background: radial-gradient(ellipse at center, rgba(240,192,64,0.12), transparent 70%);
+    border: 1px solid rgba(240,192,64,0.3);
+    border-radius: 12px;
+    min-width: 200px;
+    margin: 4px 8px;
+    align-self: center;
+  }
+  .wcp-champion-trophy { font-size: 2.5rem; margin-bottom: 8px; }
+  .wcp-champion-label {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 0.9rem;
+    letter-spacing: 0.15em;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+  .wcp-champion-name {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1.6rem;
+    letter-spacing: 0.08em;
+    color: var(--text);
+  }
+
+  /* SUMMARY */
+  .wcp-summary {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 32px;
+    text-align: center;
+    margin-top: 24px;
+  }
+  .wcp-summary-trophy { font-size: 3rem; margin-bottom: 12px; }
+  .wcp-summary-winner {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 2.5rem;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+  }
+  .wcp-summary-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--dim2);
+    margin-bottom: 6px;
+  }
+
+  /* PILL */
+  .wcp-pill {
+    display: inline-block;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    color: var(--dim2);
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+
+  /* EXPORT PANEL */
+  .wcp-export-panel {
+    margin-top: 32px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .wcp-export-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface2);
+  }
+  .wcp-export-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1rem;
+    letter-spacing: 0.1em;
+    color: var(--text);
+  }
+  .wcp-export-badge {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent2);
+    padding: 3px 8px;
+    border: 1px solid rgba(61,214,140,0.3);
+    border-radius: 3px;
+  }
+  .wcp-export-body {
+    padding: 20px;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .wcp-export-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    transition: all 0.15s;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 160px;
+  }
+  .wcp-export-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: rgba(240,192,64,0.06);
+  }
+  .wcp-export-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .wcp-export-btn.loading { opacity: 0.7; cursor: wait; }
+  .wcp-export-icon { font-size: 1.4rem; }
+  .wcp-export-btn-label { font-size: 0.78rem; color: var(--text); }
+  .wcp-export-btn-sub { font-size: 0.62rem; color: var(--dim2); font-weight: 400; margin-top: 2px; }
+  .wcp-export-note {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--dim);
+    padding: 0 20px 16px;
+    line-height: 1.6;
+  }
+
+  @media (max-width: 640px) {
+    .wcp-groups-grid { grid-template-columns: 1fr 1fr; }
+    .wcp-bracket { min-width: 700px; }
+    .wcp-match { width: 140px; font-size: 0.72rem; }
+  }
+`;
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+
+export default function WorldCupPredictor() {
+  const [step, setStep] = useState(0); // 0=groups, 1=thirds, 2=bracket
+  // groupRankings[group] = [team1, team2, team3, team4] in predicted order
+  const [groupRankings, setGroupRankings] = useState<Record<string, string[]>>(() => {
+    const init: Record<string, string[]> = {};
+    for (const g in GROUPS) init[g] = [...GROUPS[g as GroupKey]];
+    return init;
+  });
+  // Selected 8 best third-place teams (group keys)
+  const [selectedThirds, setSelectedThirds] = useState<string[]>([]);
+  // Bracket picks: { matchId: winnerTeam }
+  const [bracketPicks, setBracketPicks] = useState<Record<string, string>>({});
+
+  // Inject styles once
+  useEffect(() => {
+    const id = "wcp-styles";
+    if (!document.getElementById(id)) {
+      const el = document.createElement("style");
+      el.id = id;
+      el.textContent = STYLE;
+      document.head.appendChild(el);
+    }
+  }, []);
+
+  // ── Computed values ──────────────────────────────────────────────
+  const groupWinners: Record<string, string> = {};
+  const groupRunnerUps: Record<string, string> = {};
+  const groupThirds: Record<string, string> = {};
+  for (const g in groupRankings) {
+    groupWinners[g] = groupRankings[g][0];
+    groupRunnerUps[g] = groupRankings[g][1];
+    groupThirds[g] = groupRankings[g][2];
+  }
+
+  // Resolve a bracket slot reference to a team name
+  function resolveSlot(slot: string): string | null {
+    if (!slot) return null;
+    if (slot.startsWith("1")) {
+      const g = slot[1];
+      return groupWinners[g] || null;
+    }
+    if (slot.startsWith("2")) {
+      const g = slot[1];
+      return groupRunnerUps[g] || null;
+    }
+    if (slot.startsWith("3")) {
+      // 3ABC / 3DEF / 3GHI / 3JKL — pick from selected thirds in those groups
+      const letters = slot.slice(1).split("");
+      const eligible = letters
+        .map((l) => (selectedThirds.includes(l) ? groupThirds[l] : null))
+        .filter((t): t is string => t != null);
+      return eligible[0] || null; // just fill first available for display
+    }
+    return slot; // already a team name (from bracket picks)
+  }
+
+  // Build the bracket rounds from R32 picks
+  function buildBracket(): BracketRoundData[] {
+    // R32 → 16 → QF (8) → SF (4) → Final (2) → Champion
+    const rounds: BracketRoundData[] = [];
+    // Round of 32
+    const r32: BracketMatch[] = R32_BRACKET.map((m) => ({
+      id: m.id,
+      t1: resolveSlot(m.slot1),
+      t2: resolveSlot(m.slot2),
+    }));
+    rounds.push({ label: "Round of 32", matches: r32 });
+
+    // Build subsequent rounds from picks
+    function nextRound(prevMatches: BracketMatch[], prefix: string): BracketMatch[] {
+      const matches: BracketMatch[] = [];
+      for (let i = 0; i < prevMatches.length; i += 2) {
+        const m1 = prevMatches[i];
+        const m2 = prevMatches[i + 1];
+        if (!m1 || !m2) continue;
+        const t1 = bracketPicks[m1.id] || null;
+        const t2 = bracketPicks[m2.id] || null;
+        matches.push({ id: `${prefix}_${i / 2}`, t1, t2 });
+      }
+      return matches;
+    }
+
+    const r16 = nextRound(r32, "r16");
+    rounds.push({ label: "Round of 16", matches: r16 });
+    const qf = nextRound(r16, "qf");
+    rounds.push({ label: "Quarter-Finals", matches: qf });
+    const sf = nextRound(qf, "sf");
+    rounds.push({ label: "Semi-Finals", matches: sf });
+    const final = nextRound(sf, "final");
+    rounds.push({ label: "Final", matches: final });
+    return rounds;
+  }
+
+  const bracketRounds = buildBracket();
+  const champion = bracketRounds[4]?.matches[0]
+    ? bracketPicks[bracketRounds[4].matches[0].id]
+    : null;
+
+  // ── Group stage handlers ──────────────────────────────────────────
+  function moveTeam(group: string, idx: number, dir: number) {
+    const newOrder = [...groupRankings[group]];
+    const swapIdx = idx + dir;
+    if (swapIdx < 0 || swapIdx >= newOrder.length) return;
+    [newOrder[idx], newOrder[swapIdx]] = [newOrder[swapIdx], newOrder[idx]];
+    setGroupRankings((prev) => ({ ...prev, [group]: newOrder }));
+    // Clear downstream picks that are now invalid
+    setBracketPicks({});
+    setSelectedThirds([]);
+  }
+
+  // ── Third place handlers ──────────────────────────────────────────
+  function toggleThird(group: string) {
+    setSelectedThirds((prev) => {
+      if (prev.includes(group)) return prev.filter((g) => g !== group);
+      if (prev.length >= 8) return prev; // max 8
+      return [...prev, group];
+    });
+  }
+
+  // ── Bracket pick handler ──────────────────────────────────────────
+  function pickWinner(matchId: string, team: string) {
+    if (!team) return;
+    setBracketPicks((prev) => ({ ...prev, [matchId]: team }));
+  }
+
+  // ── Step navigation ───────────────────────────────────────────────
+  const STEPS = [
+    { label: "Group Stage" },
+    { label: "Best 3rds" },
+    { label: "Bracket" },
+  ];
+
+  // ── RENDER ────────────────────────────────────────────────────────
+  return (
+    <div className="wcp-app">
+      {/* Header */}
+      <header className="wcp-header">
+        <div className="wcp-title">
+          FIFA World Cup <span>2026</span>
+        </div>
+        <div className="wcp-subtitle">Predictor — Build Your Bracket</div>
+      </header>
+
+      {/* Stepper */}
+      <nav className="wcp-stepper">
+        {STEPS.map((s, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center" }}>
+            <div
+              className={`wcp-step ${step === i ? "active" : ""} ${step > i ? "done" : ""}`}
+              onClick={() => { if (i < step || (i === 1 && true) || (i === 2 && selectedThirds.length === 8)) setStep(i); }}
+            >
+              <div className="wcp-step-inner">
+                <div className="wcp-step-num">
+                  {step > i ? "✓" : i + 1}
+                </div>
+                <div className="wcp-step-label">{s.label}</div>
+              </div>
+            </div>
+            {i < STEPS.length - 1 && <div className="wcp-step-connector" />}
+          </div>
+        ))}
+      </nav>
+
+      <main className="wcp-content">
+        {step === 0 && (
+          <GroupStage
+            groupRankings={groupRankings}
+            onMove={moveTeam}
+            onNext={() => setStep(1)}
+          />
+        )}
+        {step === 1 && (
+          <BestThirds
+            groupRankings={groupRankings}
+            selected={selectedThirds}
+            onToggle={toggleThird}
+            onBack={() => setStep(0)}
+            onNext={() => setStep(2)}
+          />
+        )}
+        {step === 2 && (
+          <BracketStage
+            rounds={bracketRounds}
+            bracketPicks={bracketPicks}
+            champion={champion ?? null}
+            onPick={pickWinner}
+            onBack={() => setStep(1)}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
+
+// ─── GROUP STAGE ─────────────────────────────────────────────────────────────
+
+interface GroupStageProps {
+  groupRankings: Record<string, string[]>;
+  onMove: (group: string, idx: number, dir: number) => void;
+  onNext: () => void;
+}
+
+function GroupStage({ groupRankings, onMove, onNext }: GroupStageProps) {
+  return (
+    <div>
+      <div className="wcp-section-title">Group Stage Predictions</div>
+      <div className="wcp-section-desc">
+        Drag each group's standings into your predicted finishing order. Use the ▲▼ arrows to reorder.
+        The top 2 teams advance automatically; 3rd place may advance as one of the 8 best third-placed teams.
+      </div>
+      <div className="wcp-groups-grid">
+        {Object.entries(groupRankings).map(([group, teams]) => (
+          <GroupCard key={group} group={group} teams={teams} onMove={onMove} />
+        ))}
+      </div>
+      <div className="wcp-nav">
+        <button className="wcp-btn wcp-btn-primary" onClick={onNext}>
+          Next: Best 3rd Teams →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface GroupCardProps {
+  group: string;
+  teams: string[];
+  onMove: (group: string, idx: number, dir: number) => void;
+}
+
+function GroupCard({ group, teams, onMove }: GroupCardProps) {
+  const rankLabels = ["1st", "2nd", "3rd", "4th"];
+  const rankClasses = ["rank-1", "rank-2", "rank-3", ""];
+  const badgeClasses = ["rank-badge-1", "rank-badge-2", "rank-badge-3", "rank-badge-4"];
+
+  return (
+    <div className="wcp-group-card">
+      <div className="wcp-group-header">
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <span className="wcp-group-letter">GROUP {group}</span>
+        </div>
+        <span className="wcp-group-label">4 teams</span>
+      </div>
+      <div className="wcp-group-teams">
+        {teams.map((team, idx) => (
+          <div key={team} className={`wcp-team-row ${rankClasses[idx]}`}>
+            <div className="wcp-team-name">
+              <span className={`wcp-rank-badge ${badgeClasses[idx]}`}>{rankLabels[idx]}</span>
+              <span style={{ fontSize: "1.1em" }}>{FLAGS[team] || "🏳️"}</span>
+              <span>{team}</span>
+            </div>
+            <div className="wcp-rank-arrows">
+              <button
+                className="wcp-rank-arrow"
+                onClick={() => onMove(group, idx, -1)}
+                disabled={idx === 0}
+                title="Move up"
+              >▲</button>
+              <button
+                className="wcp-rank-arrow"
+                onClick={() => onMove(group, idx, 1)}
+                disabled={idx === teams.length - 1}
+                title="Move down"
+              >▼</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── BEST THIRDS ─────────────────────────────────────────────────────────────
+
+interface BestThirdsProps {
+  groupRankings: Record<string, string[]>;
+  selected: string[];
+  onToggle: (group: string) => void;
+  onBack: () => void;
+  onNext: () => void;
+}
+
+function BestThirds({ groupRankings, selected, onToggle, onBack, onNext }: BestThirdsProps) {
+  const allGroups = Object.keys(groupRankings);
+
+  return (
+    <div>
+      <div className="wcp-section-title">Best 3rd-Place Teams</div>
+      <div className="wcp-section-desc">
+        8 of the 12 third-placed teams advance to the Round of 32. Select which 8 you think will qualify.
+        <span style={{ marginLeft: "12px", color: selected.length === 8 ? "var(--accent2)" : "var(--accent)", fontFamily: "IBM Plex Mono, monospace", fontSize: "0.78rem" }}>
+          {selected.length}/8 selected
+        </span>
+      </div>
+      <div className="wcp-third-info">
+        Teams are ranked by: points → goal difference → goals scored → head-to-head → fair play.
+        The best 8 from all 12 groups advance to the bracket.
+      </div>
+      <div className="wcp-third-grid">
+        {allGroups.map((g) => {
+          const thirdTeam = groupRankings[g][2];
+          const isSelected = selected.includes(g);
+          const isExcluded = !isSelected && selected.length >= 8;
+          return (
+            <div
+              key={g}
+              className={`wcp-third-card ${isSelected ? "selected" : ""} ${isExcluded ? "excluded" : ""}`}
+              onClick={() => onToggle(g)}
+            >
+              {isSelected && <div className="wcp-third-check">✓</div>}
+              <div className="wcp-third-group">Group {g} — 3rd place</div>
+              <div className="wcp-third-team">
+                <span>{FLAGS[thirdTeam] || "🏳️"}</span>
+                <span>{thirdTeam}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="wcp-nav">
+        <button className="wcp-btn wcp-btn-secondary" onClick={onBack}>← Back</button>
+        <button
+          className="wcp-btn wcp-btn-primary"
+          disabled={selected.length !== 8}
+          onClick={onNext}
+        >
+          {selected.length !== 8 ? `Select ${8 - selected.length} more` : "To the Bracket →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── BRACKET STAGE ───────────────────────────────────────────────────────────
+
+// Lazily load html2canvas and jsPDF from CDN
+async function loadHtml2Canvas(): Promise<NonNullable<Window["html2canvas"]>> {
+  if (window.html2canvas) return window.html2canvas;
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+    s.onload = () => resolve(window.html2canvas!);
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+async function loadJsPDF(): Promise<NonNullable<Window["jspdf"]>["jsPDF"]> {
+  if (window.jspdf) return window.jspdf.jsPDF;
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+    s.onload = () => resolve(window.jspdf!.jsPDF);
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+interface BracketStageProps {
+  rounds: BracketRoundData[];
+  bracketPicks: Record<string, string>;
+  champion: string | null;
+  onPick: (matchId: string, team: string) => void;
+  onBack: () => void;
+}
+
+function BracketStage({ rounds, bracketPicks, champion, onPick, onBack }: BracketStageProps) {
+  const bracketRef = useRef<HTMLDivElement>(null);
+  const [exportState, setExportState] = useState("idle"); // idle | loading | done | error
+
+  const captureCanvas = useCallback(async () => {
+    const html2canvas = await loadHtml2Canvas();
+    const el = bracketRef.current;
+    if (!el) throw new Error("Bracket element not found");
+
+    // Temporarily expand overflow so entire bracket is captured
+    const prevOverflow = el.style.overflow;
+    const prevWidth = el.style.width;
+    el.style.overflow = "visible";
+    el.style.width = el.scrollWidth + "px";
+
+    const canvas = await html2canvas(el, {
+      backgroundColor: "#0a0c0f",
+      scale: 2,
+      useCORS: true,
+      logging: false,
+      width: el.scrollWidth,
+      height: el.scrollHeight,
+    });
+
+    el.style.overflow = prevOverflow;
+    el.style.width = prevWidth;
+    return canvas;
+  }, []);
+
+  async function handleDownloadPNG() {
+    setExportState("loading");
+    try {
+      const canvas = await captureCanvas();
+      const link = document.createElement("a");
+      link.download = `wc2026-bracket-${Date.now()}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+      setExportState("done");
+      setTimeout(() => setExportState("idle"), 2500);
+    } catch (e) {
+      console.error(e);
+      setExportState("error");
+      setTimeout(() => setExportState("idle"), 3000);
+    }
+  }
+
+  async function handleDownloadPDF() {
+    setExportState("loading");
+    try {
+      const [canvas, JsPDF] = await Promise.all([captureCanvas(), loadJsPDF()]);
+      const imgData = canvas.toDataURL("image/png");
+      const imgW = canvas.width;
+      const imgH = canvas.height;
+
+      // Landscape A2 gives plenty of room for the wide bracket
+      const pdf = new JsPDF({ orientation: "landscape", unit: "px", format: [imgW / 2, imgH / 2] });
+      pdf.addImage(imgData, "PNG", 0, 0, imgW / 2, imgH / 2);
+      pdf.save(`wc2026-bracket-${Date.now()}.pdf`);
+      setExportState("done");
+      setTimeout(() => setExportState("idle"), 2500);
+    } catch (e) {
+      console.error(e);
+      setExportState("error");
+      setTimeout(() => setExportState("idle"), 3000);
+    }
+  }
+
+  const isLoading = exportState === "loading";
+  const statusMsg =
+    exportState === "loading" ? "Rendering bracket…" :
+    exportState === "done"    ? "✓ Downloaded!" :
+    exportState === "error"   ? "Something went wrong — try again" :
+    null;
+
+  return (
+    <div>
+      <div className="wcp-section-title">Knockout Bracket</div>
+      <div className="wcp-section-desc">
+        Click a team to advance them to the next round. Work left-to-right from Round of 32 to the Final.
+      </div>
+
+      {/* The ref wraps just the visual bracket for clean capture */}
+      <div ref={bracketRef} style={{ background: "#0a0c0f", padding: "16px 0" }}>
+        {/* Mini header for the export image */}
+        <div style={{
+          fontFamily: "'Bebas Neue', sans-serif",
+          fontSize: "1.4rem",
+          letterSpacing: "0.1em",
+          color: "#e8eaf0",
+          padding: "0 16px 16px",
+          borderBottom: "1px solid #252c38",
+          marginBottom: "16px",
+          display: "flex",
+          alignItems: "center",
+          gap: "12px",
+        }}>
+          <span style={{ color: "#f0c040" }}>FIFA World Cup 2026</span>
+          <span style={{ color: "#5a6275", fontSize: "0.8rem", fontFamily: "IBM Plex Mono, monospace", letterSpacing: "0.12em" }}>
+            MY BRACKET PREDICTION
+          </span>
+        </div>
+
+        <div className="wcp-bracket-outer">
+          <div className="wcp-bracket">
+            {rounds.map((round, ri) => (
+              <BracketRound
+                key={ri}
+                round={round}
+                isLast={ri === rounds.length - 1}
+                bracketPicks={bracketPicks}
+                onPick={onPick}
+                gapMultiplier={Math.pow(2, ri)}
+              />
+            ))}
+            {/* Champion display */}
+            <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", alignSelf: "stretch" }}>
+              <div className="wcp-champion-box">
+                <div className="wcp-champion-trophy">🏆</div>
+                <div className="wcp-champion-label">World Champion</div>
+                <div className="wcp-champion-name">
+                  {champion ? (
+                    <span>{FLAGS[champion]} {champion}</span>
+                  ) : (
+                    <span style={{ color: "var(--dim)", fontSize: "1rem", fontFamily: "IBM Plex Sans", fontStyle: "italic" }}>TBD</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Export panel */}
+      <div className="wcp-export-panel">
+        <div className="wcp-export-header">
+          <span className="wcp-export-title">Export Your Bracket</span>
+          <span className="wcp-export-badge">Share it</span>
+        </div>
+        <div className="wcp-export-body">
+          <button
+            className={`wcp-export-btn ${isLoading ? "loading" : ""}`}
+            onClick={handleDownloadPNG}
+            disabled={isLoading}
+          >
+            <span className="wcp-export-icon">🖼️</span>
+            <span className="wcp-export-btn-label">Download PNG</span>
+            <span className="wcp-export-btn-sub">High-res image · share anywhere</span>
+          </button>
+          <button
+            className={`wcp-export-btn ${isLoading ? "loading" : ""}`}
+            onClick={handleDownloadPDF}
+            disabled={isLoading}
+          >
+            <span className="wcp-export-icon">📄</span>
+            <span className="wcp-export-btn-label">Download PDF</span>
+            <span className="wcp-export-btn-sub">Print-ready · landscape format</span>
+          </button>
+          {statusMsg && (
+            <div style={{
+              alignSelf: "center",
+              fontFamily: "IBM Plex Mono, monospace",
+              fontSize: "0.72rem",
+              color: exportState === "error" ? "var(--danger)" : exportState === "done" ? "var(--accent2)" : "var(--dim2)",
+              padding: "8px 4px",
+            }}>
+              {exportState === "loading" && (
+                <span style={{ marginRight: "6px", animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span>
+              )}
+              {statusMsg}
+            </div>
+          )}
+        </div>
+        <div className="wcp-export-note">
+          Captures the full bracket at 2× resolution. Emoji flags render as text in PDFs — PNG is recommended for sharing on social media.
+        </div>
+      </div>
+
+      <div className="wcp-nav">
+        <button className="wcp-btn wcp-btn-secondary" onClick={onBack}>← Back</button>
+      </div>
+
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+}
+
+interface BracketRoundProps {
+  round: BracketRoundData;
+  isLast: boolean;
+  bracketPicks: Record<string, string>;
+  onPick: (matchId: string, team: string) => void;
+  gapMultiplier: number;
+}
+
+function BracketRound({ round, bracketPicks, onPick, gapMultiplier }: BracketRoundProps) {
+  const gap = 8 * gapMultiplier;
+
+  return (
+    <div className="wcp-round">
+      <div className="wcp-round-header">{round.label}</div>
+      <div
+        className="wcp-round-matches"
+        style={{ gap: `${gap}px` }}
+      >
+        {round.matches.map((match) => (
+          <BracketMatchCard
+            key={match.id}
+            match={match}
+            winner={bracketPicks[match.id] || null}
+            onPick={(team) => onPick(match.id, team)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface BracketMatchCardProps {
+  match: BracketMatch;
+  winner: string | null;
+  onPick: (team: string) => void;
+}
+
+function BracketMatchCard({ match, winner, onPick }: BracketMatchCardProps) {
+  const { t1, t2 } = match;
+  return (
+    <div className="wcp-match">
+      <div
+        className={`wcp-match-team ${winner === t1 ? "winner" : ""}`}
+        onClick={() => t1 && onPick(t1)}
+        title={t1 ? `Pick ${t1}` : ""}
+      >
+        <div className="wcp-match-team-name">
+          {t1 ? (
+            <>
+              <span className="wcp-match-flag">{FLAGS[t1] || "🏳️"}</span>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t1}</span>
+            </>
+          ) : (
+            <span style={{ color: "var(--dim)", fontStyle: "italic", fontSize: "0.78em" }}>TBD</span>
+          )}
+        </div>
+        <div className="wcp-win-dot" />
+      </div>
+      <div className="wcp-match-divider" />
+      <div
+        className={`wcp-match-team ${winner === t2 ? "winner" : ""}`}
+        onClick={() => t2 && onPick(t2)}
+        title={t2 ? `Pick ${t2}` : ""}
+      >
+        <div className="wcp-match-team-name">
+          {t2 ? (
+            <>
+              <span className="wcp-match-flag">{FLAGS[t2] || "🏳️"}</span>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t2}</span>
+            </>
+          ) : (
+            <span style={{ color: "var(--dim)", fontStyle: "italic", fontSize: "0.78em" }}>TBD</span>
+          )}
+        </div>
+        <div className="wcp-win-dot" />
+      </div>
+    </div>
+  );
+}
